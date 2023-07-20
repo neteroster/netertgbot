@@ -1,0 +1,20 @@
+{
+  "name": "netertgbot",
+  "version": "0.0.1",
+  "description": "Telegram bot for NeterOster",
+  "main": "src/main.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "NeterOster",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node-telegram-bot-api": "^0.61.6",
+    "typescript": "^5.1.6"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.61.0",
+    "openai": "^3.3.0"
+  }
+}
