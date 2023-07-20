@@ -1,18 +1,19 @@
 import { ChatGPTContext } from "./openaiGpt.js"
 import tgBot, { senderOf, errfySender, Sender } from "./tgbot.js"
-import { MultiContexts, isGPTModel } from "./openaiGpt.js";
+import { GPTMultiContexts, isGPTModel } from "./openaiGpt.js";
 import ChatContexts from "./chatContext.js";
+import TelegramBot from "node-telegram-bot-api";
 
-const gptContexts = new MultiContexts();
+const gptContexts = new GPTMultiContexts();
 const chatContexts = new ChatContexts();
 
-async function queryGPTAndResp(ctx: ChatGPTContext, sender: Sender) {
+async function queryGPT(ctx: ChatGPTContext) {
     try {
         const res = (await ctx.send()).data.choices[0].message;
-        if (res?.content === undefined) { errfySender(sender)("Invalid response"); return; }
-        sender(res.content);
+        if (res?.content === undefined) { return "[Error] Invalid response from GPT."; }
+        return res.content;
     } catch (err) {
-        errfySender(sender)(`Error Requesting GPT: ${err}`);
+        return `[Error] Error requesting GPT: ${err}`;
     }
 }
 
@@ -21,134 +22,128 @@ tgBot.on("message", (msg) => {
     chatContexts.ctxOf(chatId).push(msg);
 });
 
+function inputHandleSend<T, R>(
+    messageHandler: (msg: TelegramBot.Message, match: RegExpExecArray) => T,
+    actions: (userInput: T) => R | Promise<R>,
+    reply: (result: R, sender: Sender) => void) {
 
-tgBot.onText(/\/gptCreate (.+) (.+)/, (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
-    const sendErr = errfySender(sendMsg);
+        return async function (msg: TelegramBot.Message, match: RegExpExecArray | null) {
+            const sendMsg = senderOf(tgBot, msg.chat.id);
+            const sendErr = errfySender(sendMsg);
 
-    if (match === null) { sendErr("Invalid match"); return; }
-    const chatId = msg.chat.id;
-    const contextName = match[1];
-    const modelName = match[2];
+            if (match === null) { sendErr("Invalid match"); return; }
 
-    if (gptContexts.contextOf(contextName) !== undefined) {
-        sendErr(`Context ${contextName} already exists.`);
-        return;
-    }
+            const userInput = messageHandler(msg, match);
+            const result = await actions(userInput);
+            reply(result, sendMsg);
+        }
+}
 
-    if (!isGPTModel(modelName)) {
-        sendErr(`Invalid model name ${modelName}.`);
-        return;
-    }
 
-    gptContexts.newContext(contextName, new ChatGPTContext(modelName));
-    sendMsg(`Context ${contextName} created.`);
-});
+tgBot.onText(/\/gptCreate (.+) (.+)/, inputHandleSend(
+    (_, match) => ({
+        contextName: match[1],
+        modelName: match[2]
+    }),
+    (userInput) => {
+        const { contextName, modelName } = userInput;
 
-tgBot.onText(/\/gptDelete (.+)/, (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
-    const sendErr = errfySender(sendMsg);
+        if (gptContexts.contextOf(contextName) !== undefined) {
+            return `Error: Context ${contextName} already exists.`;
+        }
 
-    if (match === null) { sendErr("Invalid match"); return; }
-    const chatId = msg.chat.id;
-    const contextName = match[1];
+        if (!isGPTModel(modelName)) {
+            return `Error: Invalid model name ${modelName}.`;
+        }
 
-    if (gptContexts.contextOf(contextName) === undefined) {
-        sendErr(`Context ${contextName} does not exist.`);
-        return;
-    }
+        gptContexts.newContext(contextName, new ChatGPTContext(modelName));
+        return `Context ${contextName} created.`;
+    },
+    (result, sendMsg) => sendMsg(result))
+);
 
-    gptContexts.delContext(contextName);
-    sendMsg(`Context ${contextName} deleted.`);
-});
+tgBot.onText(/\/gptDelete (.+)/, inputHandleSend(
+    (_, match) => match[1],
+    (userInput) => {
+        const contextName = userInput;
 
-tgBot.onText(/\/gptList/, (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
+        if (gptContexts.contextOf(contextName) === undefined) {
+            return `Error: Context ${contextName} does not exist.`;
+        }
 
-    const contextNames = Array.from(gptContexts.contexts.keys());
-    sendMsg(`Contexts: ${contextNames.join(", ")}`);
-});
+        gptContexts.delContext(contextName);
+        return `Context ${contextName} deleted.`;
+    },
+    (result, sendMsg) => sendMsg(result))
+);
 
-tgBot.onText(/\/gptSend (.+) (.+)/, async (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
-    const sendErr = errfySender(sendMsg);
+tgBot.onText(/\/gptList/, inputHandleSend(
+    (_) => undefined,
+    (_) => Array.from(gptContexts.contexts.keys()).join(", "),
+    (result, sendMsg) => sendMsg(`Contexts: ${result}`))
+);
 
-    if (match === null) { sendErr("Invalid match"); return; }
 
-    const chatId = msg.chat.id;
-    const contextName = match[1];
-    const queryContent = match[2];
+tgBot.onText(/\/gptSend (.+) (.+)/, inputHandleSend(
+    (_, match) => ({
+        contextName: match[1],
+        queryContent: match[2]
+    }),
+    async (userInput) => {
+        const { contextName, queryContent } = userInput;
 
-    const gptContext = gptContexts.contextOf(contextName);
-    if (gptContext === undefined) {
-        sendErr(`Context ${contextName} does not exist.`);
-        return;
-    }
+        const gptContext = gptContexts.contextOf(contextName);
+        if (gptContext === undefined) {
+            return `Error: Context ${contextName} does not exist.`;
+        }
 
-    gptContext.add({
-        role: "user",
-        content: queryContent
-    });
+        gptContext.add({
+            role: "user",
+            content: queryContent
+        });
+        
+        const res = await queryGPT(gptContext);
+        return res;
+    },
+    (result, sendMsg) => sendMsg(result))
+);
 
-    await queryGPTAndResp(gptContext, sendMsg);
-});
 
-tgBot.onText(/\/recap (\d+)/, (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
-    const sendErr = errfySender(sendMsg);
+tgBot.onText(/\/gptWithContext (.+) (\d+) (.+)/, inputHandleSend(
+    (msg, match) => ({
+        modelName: match[1],
+        maxLen: parseInt(match[2]),
+        queryContent: match[3],
+        chatId: msg.chat.id
+    }),
+    (userInput) => {
+        const { modelName, maxLen, queryContent, chatId } = userInput;
 
-    if (match === null) { sendErr("Invalid match"); return; }
+        if (!isGPTModel(modelName)) { return `Invalid model name ${modelName}.`; }
 
-    const chatId = msg.chat.id;
-    const maxLen = parseInt(match[1]);
+        const gptContext = new ChatGPTContext(modelName);
+        const ctx = chatContexts
+        .ctxOf(chatId)
+        .slice(-maxLen)
+        .filter((msg) => msg.text !== undefined && !msg.text.startsWith("/"))
+        .map((msg) => {
+            if (msg.from?.first_name === undefined) return `Anonymous: ${msg.text}`;
+            else return `${msg.from.first_name}: ${msg.text}`;
+        }).join("\n");
 
-    const chatContext = chatContexts.ctxOf(chatId);
-    const messages = chatContext.slice(-maxLen);
+        gptContext.add({
+            role: "user",
+            content: ctx
+        });
 
-    const recap = messages
-    .filter((msg) => msg.text !== undefined && !msg.text.startsWith("/"))
-    .map((msg) => {
-        if (msg.from?.first_name === undefined) return `Anonymous: ${msg.text}`;
-        else return `${msg.from.first_name}: ${msg.text}`;
-    }).join("\n");
+        const query = "According to the above conversation, answer the following question:\n" + queryContent;
+        gptContext.add({
+            role: "user",
+            content: query
+        });
 
-    sendMsg(recap);
-});
-
-tgBot.onText(/\/gptWithContext (.+) (\d+) (.+)/, (msg, match) => {
-    const sendMsg = senderOf(tgBot, msg.chat.id);
-    const sendErr = errfySender(sendMsg);
-
-    if (match === null) { sendErr("Invalid match"); return; }
-
-    const chatId = msg.chat.id;
-    const modelName = match[1];
-    const maxLen = parseInt(match[2]);
-    const queryContent = match[3];
-
-    if (!isGPTModel(modelName)) { sendErr(`Invalid model name ${modelName}.`); return; }
-
-    const gptContext = new ChatGPTContext(modelName);
-    const ctx = chatContexts
-    .ctxOf(chatId)
-    .slice(-maxLen)
-    .filter((msg) => msg.text !== undefined && !msg.text.startsWith("/"))
-    .map((msg) => {
-        if (msg.from?.first_name === undefined) return `Anonymous: ${msg.text}`;
-        else return `${msg.from.first_name}: ${msg.text}`;
-    }).join("\n");
-
-    gptContext.add({
-        role: "user",
-        content: ctx
-    });
-
-    const query = "According to the above conversation, answer the following question:\n" + queryContent;
-    gptContext.add({
-        role: "user",
-        content: query
-    });
-
-    queryGPTAndResp(gptContext, sendMsg);
-
-});
+        return queryGPT(gptContext);
+    },
+    (result, sendMsg) => sendMsg(result))
+);
+    
